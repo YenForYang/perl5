@@ -1,4 +1,6 @@
 /*    regcomp.c
+khw.pl in tests
+mortalize the Sv in more cases, like FAIL(); perhaps remove the unused ones that don't do this.
  */
 
 /*
@@ -219,7 +221,7 @@ struct RExC_state_t {
 #define RExC_mysv2	(pRExC_state->mysv2)
 
 #endif
-    bool        seen_unfolded_sharp_s;
+    bool        seen_d_op;
     bool        strict;
     bool        study_started;
     bool        in_script_run;
@@ -240,16 +242,8 @@ struct RExC_state_t {
 #define RExC_parse	(pRExC_state->parse)
 #define RExC_latest_warn_offset (pRExC_state->latest_warn_offset )
 #define RExC_whilem_seen	(pRExC_state->whilem_seen)
+#define RExC_seen_d_op (pRExC_state->seen_d_op)
 
-/* Set during the sizing pass when there is a LATIN SMALL LETTER SHARP S in any
- * EXACTF node, hence was parsed under /di rules.  If later in the parse,
- * something forces the pattern into using /ui rules, the sharp s should be
- * folded into the sequence 'ss', which takes up more space than previously
- * calculated.  This means that the sizing pass needs to be restarted.  (The
- * node also becomes an EXACTFU_SS.)  For all other characters, an EXACTF node
- * that gets converted to /ui (and EXACTFU) occupies the same amount of space,
- * so there is no need to resize [perl #125990]. */
-#define RExC_seen_unfolded_sharp_s (pRExC_state->seen_unfolded_sharp_s)
 
 #ifdef RE_TRACK_PATTERN_OFFSETS
 #  define RExC_offsets	(RExC_rxi->u.offsets) /* I am not like the
@@ -259,7 +253,7 @@ struct RExC_state_t {
 #define RExC_emit_start	(pRExC_state->emit_start)
 #define RExC_sawback	(pRExC_state->sawback)
 #define RExC_seen	(pRExC_state->seen)
-#define RExC_size	(pRExC_state->size)
+#define RExC_size	(pRExC_state->size) /* XXX good riddance */
 #define RExC_maxlen        (pRExC_state->maxlen)
 #define RExC_npar	(pRExC_state->npar)
 #define RExC_total_parens	(pRExC_state->total_par)
@@ -361,8 +355,10 @@ struct RExC_state_t {
             if (DEPENDS_SEMANTICS) {                                        \
                 set_regex_charset(&RExC_flags, REGEX_UNICODE_CHARSET);      \
                 RExC_uni_semantics = 1;                                     \
-                    *flagp |= RESTART_PARSE;                                \
-                    return restart_retval;                                  \
+                    if (RExC_seen_d_op && LIKELY(RExC_total_parens >= 0)) { \
+                        *flagp |= RESTART_PARSE;                            \
+                        return restart_retval;                              \
+                    }                                                       \
             }                                                               \
     } STMT_END
 
@@ -370,8 +366,10 @@ struct RExC_state_t {
 #define REQUIRE_BRANCHJ(flagp, restart_retval)                              \
     STMT_START {                                                            \
                 RExC_use_BRANCHJ = 1;                                       \
-                *flagp |= RESTART_PARSE;                                    \
-                return restart_retval;                                      \
+                if (LIKELY(RExC_total_parens >= 0)) {                       \
+                    *flagp |= RESTART_PARSE;                                \
+                    return restart_retval;                                  \
+                }                                                           \
     } STMT_END
 
 #define REQUIRE_PARENS_PASS                                                 \
@@ -832,7 +830,9 @@ static const scan_data_t zero_scan_data = {
 #define UPDATE_WARNINGS_LOC(loc)                                        \
     STMT_START {                                                        \
         if (TO_OUTPUT_WARNINGS(loc)) {                                  \
+            DEBUG_U(PerlIO_printf(Perl_debug_log, "%s: %d: latest_warn_offset before update=%ld\n", __FILE__, __LINE__, RExC_latest_warn_offset)); \
             RExC_latest_warn_offset = (xI(loc)) - RExC_precomp;         \
+            DEBUG_U(PerlIO_printf(Perl_debug_log, "%s: %d: latest_warn_offset after update=%ld\n", __FILE__, __LINE__, RExC_latest_warn_offset)); \
         }                                                               \
     } STMT_END
 
@@ -3598,14 +3598,25 @@ S_make_trie(pTHX_ RExC_state_t *pRExC_state, regnode *startbranch,
             while ( ++opt < optimize) {
                 Set_Node_Offset_Length(opt, 0, 0);
             }
+        });
+
+#ifdef RE_TRACK_PATTERN_OFFSETS
+        /* This has to be separated out from the surroundings because some
+         * compilers can't handle this #ifdef within a DEBUG_r macro */
+        DEBUG_r(if (optimize) {
+            regnode *temp = optimize;
+            while( temp < jumper ) {
+                mjd_nodelen += Node_Length((temp));
+                temp++;
+            }
+        });
+#endif
+        DEBUG_r(if (optimize) {
             /*
                 Try to clean up some of the debris left after the
                 optimisation.
              */
             while( optimize < jumper ) {
-#ifdef RE_TRACK_PATTERN_OFFSETS
-                mjd_nodelen += Node_Length((optimize));
-#endif
                 OP( optimize ) = OPTIMIZED;
                 Set_Node_Offset_Length(optimize, 0, 0);
                 optimize++;
@@ -5253,6 +5264,7 @@ S_study_chunk(pTHX_ RExC_state_t *pRExC_state, regnode **scanp,
                             "in regex m/%" UTF8f "/",
 			     UTF8fARG(UTF, RExC_precomp_end - RExC_precomp,
 				  RExC_precomp)));
+                    /* XXX ^^ REPORT_LOCATION_ARGS(RExC_precomp_end))); */
                 }
 
 		min += minnext * mincount;
@@ -6395,6 +6407,7 @@ S_pat_upgrade_to_utf8(pTHX_ RExC_state_t * const pRExC_state,
     DEBUG_PARSE_r(Perl_re_printf( aTHX_
         "UTF8 mismatch! Converting to utf8 for resizing and compile\n"));
 
+    /* XXX allocate only what's needed, or use RExC_parse as a starting position, and allocate from there, Copying from start to here */
     Newx(dst, *plen_p * 2 + 1, U8);
     d = dst;
 
@@ -6420,6 +6433,7 @@ S_pat_upgrade_to_utf8(pTHX_ RExC_state_t * const pRExC_state,
     *d = '\0';
     *plen_p = d - dst;
     *pat_p = (char*) dst;
+    /* XXX trim the result */
     SAVEFREEPV(*pat_p);
     RExC_orig_utf8 = RExC_utf8 = 1;
 }
@@ -6965,7 +6979,7 @@ S_set_regex_pv(pTHX_ RExC_state_t *pRExC_state, REGEXP *Rx)
      * properly wrapped with the right modifiers */
 
     bool has_p     = ((RExC_rx->extflags & RXf_PMf_KEEPCOPY) == RXf_PMf_KEEPCOPY);
-    bool has_charset = (get_regex_charset(RExC_rx->extflags)
+    bool has_charset = RExC_utf8 || (get_regex_charset(RExC_rx->extflags)
                                                 != REGEX_DEPENDS_CHARSET);
 
     /* The caret is output if there are any defaults: if not all the STD
@@ -7009,7 +7023,14 @@ S_set_regex_pv(pTHX_ RExC_state_t *pRExC_state, REGEXP *Rx)
     }
     if (has_charset) {
         STRLEN len;
-        const char* const name = get_regex_charset_name(RExC_rx->extflags, &len);
+        const char* name;
+        if (RExC_utf8) {
+            name = UNICODE_PAT_MODS;
+            len = sizeof(UNICODE_PAT_MODS) - 1;
+        }
+        else {
+            name = get_regex_charset_name(RExC_rx->extflags, &len);
+        }
         Copy(name, p, len, char);
         p += len;
     }
@@ -7251,12 +7272,11 @@ Perl_re_op_compile(pTHX_ SV ** const patternp, int pat_count,
     }
 
     /* ignore the utf8ness if the pattern is 0 length */
-    RExC_utf8 = RExC_orig_utf8 = (plen == 0 || IN_BYTES) ? 0 : SvUTF8(pat);
+    RExC_utf8 = RExC_orig_utf8 = (plen == 0 || IN_BYTES) ? 0 : cBOOL(SvUTF8(pat));
 
     RExC_uni_semantics = RExC_utf8; /* UTF-8 implies unicode semantics;
                                        otherwise we may find later this should
                                        be 1 */
-    RExC_seen_unfolded_sharp_s = 0;
     RExC_contains_locale = 0;
     RExC_strict = cBOOL(pm_flags & RXf_PMf_STRICT);
     RExC_in_script_run = 0;
@@ -7326,9 +7346,7 @@ Perl_re_op_compile(pTHX_ SV ** const patternp, int pat_count,
 
     rx_flags = orig_rx_flags;
 
-    if (   initial_charset == REGEX_DEPENDS_CHARSET
-        && (RExC_uni_semantics))
-    {
+    if (initial_charset == REGEX_DEPENDS_CHARSET && RExC_uni_semantics) {
 
 	/* Set to use unicode semantics if the pattern is in utf8 and has the
 	 * 'depends' charset specified, as it means unicode when utf8  */
@@ -8079,6 +8097,8 @@ Perl_re_op_compile(pTHX_ SV ** const patternp, int pat_count,
         regdump(RExC_rx);
     });
 #ifdef RE_TRACK_PATTERN_OFFSETS
+    DEBUG_r(Perl_re_printf( aTHX_  "%s: %d: RExC_size=%d, emit=%d\n", __FILE__, __LINE__, RExC_size, RExC_emit));
+
     DEBUG_OFFSETS_r(if (RExC_offsets) {
         const STRLEN len = RExC_offsets[0];
         STRLEN i;
@@ -8167,6 +8187,7 @@ Perl_reg_named_buff_fetch(pTHX_ REGEXP * const r, SV * const namesv,
             I32 *nums=(I32*)SvPVX(sv_dat);
             AV * const retarray = (flags & RXapif_ALL) ? newAV() : NULL;
             for ( i=0; i<SvIVX(sv_dat); i++ ) {
+                /* XXX */
                 if ((I32)(rx->nparens) >= nums[i]
                     && rx->offs[nums[i]].start != -1
                     && rx->offs[nums[i]].end != -1)
@@ -11556,7 +11577,9 @@ S_reg(pTHX_ RExC_state_t *pRExC_state, I32 paren, I32 *flagp, U32 depth)
                                       );
                     FLAGS(REGNODE_p(ret)) = 2;
                     REGTAIL(pRExC_state, ret, eval);
-                    /* deal with the length of this later - MJD */
+                    /* deal with the length of this later - MJD;
+                     * in the meantime put in an obvious dummy - khw */
+                    Set_Node_Length(REGNODE_p(ret), 987654321);
 		    return ret;
 		}
 		ret = reg2Lanode(pRExC_state, EVAL, n, 0);
@@ -12148,7 +12171,7 @@ S_regbranch(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, I32 first, U32 depth)
 	    /* FIXME adding one for every branch after the first is probably
 	     * excessive now we have TRIE support. (hv) */
 	    MARK_NAUGHTY(1);
-            if (     chain > (SSize_t) BRANCH_MAX_OFFSET
+            if (     chain /*- br*/ > (SSize_t) BRANCH_MAX_OFFSET
                 && ! RExC_use_BRANCHJ)
             {
                 REQUIRE_BRANCHJ(flagp, 0);
@@ -12203,7 +12226,7 @@ S_regpiece(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
     const char *maxpos = NULL;
     UV uv;
 
-    /* Save the original in case we change the emitted regop to a FAIL. */
+    /* Save XXX the original in case we change the emitted regop to a FAIL. */
     const regnode_offset orig_emit = RExC_emit;
 
     GET_RE_DEBUG_FLAGS_DECL;
@@ -12472,7 +12495,7 @@ S_grok_bslash_N(pTHX_ RExC_state_t *pRExC_state,
   * function calling S_reg().
   *
   * The final possibility is that it is premature to be calling this function;
-  * that pass1 needs to be restarted.  This can happen when this changes from
+  * that parse needs to be restarted.  This can happen when this changes from
   * /d to /u rules, or when the pattern needs to be upgraded to UTF-8.  The
   * latter occurs only when the fourth possibility would otherwise be in
   * effect, and is because one of those code points requires the pattern to be
@@ -12805,8 +12828,7 @@ S_alloc_maybe_populate_EXACT(pTHX_ RExC_state_t *pRExC_state,
      *
      * If <len> is zero, the function assumes that the node is to contain only
      * the single character given by <code_point> and calculates what <len>
-     * should be.  In pass 1, it sizes the node appropriately.  In pass 2, it
-     * additionally will populate the node's STRING with <code_point> or its
+     * should be.  It populates the node's STRING with <code_point> or its
      * fold if folding.
      *
      * In both cases <*flagp> is appropriately set
@@ -13112,7 +13134,7 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
 	    ret = reg_node(pRExC_state, MBOL);
 	else
 	    ret = reg_node(pRExC_state, SBOL);
-        Set_Node_Length(REGNODE_p(ret), 1); /* MJD */
+        /* XXX fix these */ Set_Node_Length(REGNODE_p(ret), 1); /* MJD */
 	break;
     case '$':
 	nextchar(pRExC_state);
@@ -13143,7 +13165,6 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                        FALSE, /* don't silence non-portable warnings. */
                        (bool) RExC_strict,
                        TRUE, /* Allow an optimized regnode result */
-                       NULL,
                        NULL);
         if (ret == 0) {
             RETURN_FAIL_ON_RESTART_FLAGP_OR_FLAGS(flagp, NEED_UTF8);
@@ -13211,7 +13232,7 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
 	    RExC_seen_zerolen++;
 	    ret = reg_node(pRExC_state, SBOL);
             /* SBOL is shared with /^/ so we set the flags so we can tell
-             * /\A/ from /^/ in split. We check ret because first pass we
+             * /\A/ from /^/ in split. We check ret because first XXX pass we
              * have no regop struct to set the flags on. */
             FLAGS(REGNODE_p(ret)) = 1;
 	    *flagp |= SIMPLE;
@@ -13266,7 +13287,10 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
             RExC_seen |= REG_LOOKBEHIND_SEEN;
 	    op = BOUND + charset;
 
-            if (op == BOUNDL) {
+            if (op == BOUND) {
+                RExC_seen_d_op = TRUE;
+            }
+            else if (op == BOUNDL) {
                 RExC_contains_locale = 1;
             }
 
@@ -13415,6 +13439,9 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
             else if (op == POSIXL) {
                 RExC_contains_locale = 1;
             }
+            else if (op == POSIXD) {
+                RExC_seen_d_op = TRUE;
+            }
 
           join_posix_op_known:
 
@@ -13450,7 +13477,6 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                                      non-portables */
                            (bool) RExC_strict,
                            TRUE, /* Allow an optimized regnode result */
-                           NULL,
                            NULL);
             RETURN_FAIL_ON_RESTART_FLAGP(flagp);
             /* regclass() can only return RESTART_PARSE and NEED_UTF8 if
@@ -13633,6 +13659,9 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                                        ? REFFL
                                        : REFF),
                                 num);
+                if (OP(REGNODE_p(ret)) == REFF) {
+                    RExC_seen_d_op = TRUE;
+                }
                 *flagp |= HASWIDTH;
 
                 /* override incorrect value set in reganode MJD */
@@ -13701,7 +13730,8 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
             U8 node_type = EXACT;
 
             /* Assume node will be fully used; the excess is given back at the end */
-            Ptrdiff_t initial_size = STR_SZ(256);
+            /*Ptrdiff_t initial_size = STR_SZ(MIN(RExC_end - RExC_parse, 256));*/
+            Ptrdiff_t initial_size = STR_SZ(256); /* XXX because of utf8 fold expansion */
 
             bool next_is_quantifier;
             char * oldp = NULL;
@@ -13714,8 +13744,7 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
              * Similarly, we can convert EXACTFL nodes to EXACTFLU8 if they
              * contain only above-Latin1 characters (hence must be in UTF8),
              * which don't participate in folds with Latin1-range characters,
-             * as the latter's folds aren't known until runtime.  (We don't
-             * need to figure this out until pass 2) */
+             * as the latter's folds aren't known until runtime. */
             bool maybe_exactfu = TRUE;
 
             /* To see if RExC_uni_semantics changes during parsing of the node.
@@ -14124,7 +14153,8 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                      * multi-char fold.  And unlike the regular fold case
                      * handled in the else clauses below, we don't actually
                      * fold and don't have special cases to consider.  What we
-                     * do for both passes is the PASS2 code for non-folding */
+                     * probably can collapse these 'if's
+                     * do for both passes is the XXX PASS2 code for non-folding */
                     goto not_fold_common;
                 }
                 else                /* A regular FOLD code point */
@@ -14184,7 +14214,7 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                             {
                                 /* Here, we are supossed to be using Unicode
                                  * rules, but this folding node is not.  This
-                                 * happens during pass 1 when the node started
+                                 * XXX happens during pass 1 when the node started
                                  * out not under Unicode rules, but a \N{} was
                                  * encountered during the processing of it,
                                  * causing Unicode rules to be switched into.
@@ -14199,7 +14229,6 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                                 goto loopdone;
                             }
                             else {
-                                RExC_seen_unfolded_sharp_s = 1;
                                 maybe_exactfu = FALSE;
                             }
                         }
@@ -14222,16 +14251,9 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                         *(s++) = (char) ender;
                     }
                 }
-                else {  /* FOLD, and UTF */
-                    /* Unlike the non-fold case, we do actually have to
-                     * calculate the fold in pass 1.  This is for two reasons,
-                     * the folded length may be longer than the unfolded, and
-                     * we have to calculate how many EXACTish nodes it will
-                     * take; and we may run out of room in a node in the middle
-                     * of a potential multi-char fold, and have to back off
-                     * accordingly.  */
-
-                    if (isASCII_uni(ender)) {
+                else   /* FOLD, and UTF */
+                     if (isASCII_uni(ender)) {
+            /* XXX dent */
 
                         /* As above, we close up and start a new node if the
                          * previous characters don't match the fold/non-fold
@@ -14296,7 +14318,6 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                             s += foldlen;
                             added_len = foldlen;
                         }
-                    }
 		}
 
                 len += added_len;
@@ -14502,6 +14523,9 @@ S_regatom(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth)
                             OP(REGNODE_p(ret)) = EXACTFLU8;
                         }
                     }
+                    else if (node_type == EXACTF) {
+                        RExC_seen_d_op = TRUE;
+                    }
                 }
 
                 alloc_maybe_populate_EXACT(pRExC_state, ret, flagp, len, ender,
@@ -14639,6 +14663,7 @@ S_populate_ANYOF_from_invlist(pTHX_ regnode *node, SV** invlist_ptr)
                                              REPORT_LOCATION_ARGS(p)));     \
         }                                                                   \
     } STMT_END
+/* XXX */
 #define CLEAR_POSIX_WARNINGS()                                              \
     STMT_START {                                                            \
         if (posix_warnings && RExC_warn_text)                               \
@@ -14691,17 +14716,7 @@ S_handle_possible_posix(pTHX_ RExC_state_t *pRExC_state,
      * In b) there may be errors or warnings generated.  If 'check_only' is
      * TRUE, then any errors are discarded.  Warnings are returned to the
      * caller via an AV* created into '*posix_warnings' if it is not NULL.  If
-     * instead it is NULL, warnings are suppressed.  This is done in all
-     * passes.  The reason for this is that the rest of the parsing is heavily
-     * dependent on whether this routine found a valid posix class or not.  If
-     * it did, the closing ']' is absorbed as part of the class.  If no class,
-     * or an invalid one is found, any ']' will be considered the terminator of
-     * the outer bracketed character class, leading to very different results.
-     * In particular, a '(?[ ])' construct will likely have a syntax error if
-     * the class is parsed other than intended, and this will happen in pass1,
-     * before the warnings would normally be output.  This mechanism allows the
-     * caller to output those warnings in pass1 just before dieing, giving a
-     * much better clue as to what is wrong.
+     * instead it is NULL, warnings are suppressed.
      *
      * The reason for this function, and its complexity is that a bracketed
      * character class can contain just about anything.  But it's easy to
@@ -15695,7 +15710,6 @@ redo_curchar:
                     if (UCHARAT(RExC_parse) != ')')
                         vFAIL("Expecting close paren for wrapper for nested extended charclass");
 
-                    RExC_parse++;
                     RExC_flags = save_flags;
                     goto handle_operand;
                 }
@@ -15733,8 +15747,7 @@ redo_curchar:
                               FALSE, /* don't silence non-portable warnings.  */
                               TRUE,  /* strict */
                               FALSE, /* Require return to be an ANYOF */
-                              &current,
-                              NULL))
+                              &current))
                 {
                     FAIL2("panic: regclass returned failure to handle_sets, "
                           "flags=%#" UVxf, (UV) *flagp);
@@ -15761,7 +15774,7 @@ redo_curchar:
                     RExC_parse++;
                 }
 
-                /* regclass() can only return RESTART_PARSE and NEED_UTF8 if
+                /* regclass() can only return RESTART_XXXPARSE and NEED_UTF8 if
                  * multi-char folds are allowed.  */
                 if (!regclass(pRExC_state, flagp, depth+1,
                                 is_posix_class, /* parse the whole char
@@ -15771,9 +15784,7 @@ redo_curchar:
                                 TRUE, /* silence non-portable warnings. */
                                 TRUE, /* strict */
                                 FALSE, /* Require return to be an ANYOF */
-                                &current,
-                                NULL
-                                ))
+                                &current))
                 {
                     FAIL2("panic: regclass returned failure to handle_sets, "
                           "flags=%#" UVxf, (UV) *flagp);
@@ -16123,7 +16134,6 @@ redo_curchar:
                              they're valid on this machine */
                     FALSE, /* similarly, no need for strict */
                     FALSE, /* Require return to be an ANYOF */
-                    NULL,
                     NULL
                 );
 
@@ -16318,47 +16328,37 @@ S_add_above_Latin1_folds(pTHX_ RExC_state_t *pRExC_state, const U8 cp, SV** invl
 }
 
 STATIC void
-S_output_or_return_posix_warnings(pTHX_ RExC_state_t *pRExC_state, AV* posix_warnings, AV** return_posix_warnings)
+S_output_or_return_posix_warnings(pTHX_ RExC_state_t *pRExC_state, AV* posix_warnings)
 {
     /* If the final parameter is NULL, output the elements of the array given
      * by '*posix_warnings' as REGEXP warnings.  Otherwise, the elements are
      * pushed onto it, (creating if necessary) */
 
     SV * msg;
-    const bool first_is_fatal =  ! return_posix_warnings
-                                && ckDEAD(packWARN(WARN_REGEXP));
+    const bool first_is_fatal = ckDEAD(packWARN(WARN_REGEXP));
+    /* XXX pod ckDEAD */
 
     PERL_ARGS_ASSERT_OUTPUT_OR_RETURN_POSIX_WARNINGS;
 
     while ((msg = av_shift(posix_warnings)) != &PL_sv_undef) {
-        if (return_posix_warnings) {
-            if (! *return_posix_warnings) { /* mortalize to not leak if
-                                               warnings are fatal */
-                *return_posix_warnings = (AV *) sv_2mortal((SV *) newAV());
-            }
-            av_push(*return_posix_warnings, msg);
-        }
-        else {
+            /* XXX dent */
             if (first_is_fatal) {           /* Avoid leaking this */
                 av_undef(posix_warnings);   /* This isn't necessary if the
                                                array is mortal, but is a
                                                fail-safe */
                 (void) sv_2mortal(msg);
-                if (ckDEAD(packWARN(WARN_REGEXP))) {
+            /* XXX dent , probably could use some other FAIL that didn't need to make this mortal */
                     PREPARE_TO_DIE;
-                }
             }
             if (TO_OUTPUT_WARNINGS(RExC_parse)) {
                 Perl_warner(aTHX_ packWARN(WARN_REGEXP), "%s",
                                            SvPVX(msg));
             }
             SvREFCNT_dec_NN(msg);
-        }
     }
 
-    if (! return_posix_warnings) {
+            /* XXX dent */
         UPDATE_WARNINGS_LOC(RExC_parse);
-    }
 }
 
 STATIC AV *
@@ -16441,8 +16441,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                  const bool strict,
                  bool optimizable,                  /* ? Allow a non-ANYOF return
                                                        node */
-                 SV** ret_invlist, /* Return an inversion list, not a node */
-                 AV** return_posix_warnings
+                 SV** ret_invlist  /* Return an inversion list, not a node */
           )
 {
     /* parse a bracketed class specification.  Most of these will produce an
@@ -16568,7 +16567,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
     char *not_posix_region_end = RExC_parse - 1;
 
     AV* posix_warnings = NULL;
-    const bool do_posix_warnings = return_posix_warnings || ckWARN(WARN_REGEXP);
+    const bool do_posix_warnings = ckWARN(WARN_REGEXP);
     U8 op = END;    /* The returned node-type, initialized to an impossible
                        one.  */
     U8 anyof_flags = 0;   /* flag bits if the node is an ANYOF-type */
@@ -16581,6 +16580,13 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
 #ifndef DEBUGGING
     PERL_UNUSED_ARG(depth);
 #endif
+
+
+    /* If wants an inversion list returned, we can't optimize to something
+     * else. */
+    if (ret_invlist) {
+        optimizable = FALSE;
+    }
 
     DEBUG_PARSE("clas");
 
@@ -16648,8 +16654,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
              * them, if it has so specified, to what gets returned to the
              * caller.  This is done each time through the loop so that a later
              * class won't zap them before they have been dealt with. */
-            output_or_return_posix_warnings(pRExC_state, posix_warnings,
-                                            return_posix_warnings);
+            output_or_return_posix_warnings(pRExC_state, posix_warnings);
         }
 
         if  (RExC_parse >= stop_ptr) {
@@ -17257,20 +17262,19 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                                                          : 1)))
                 {
                     posixl_matches_all = TRUE;
-                    break;  /* No need to continue.  Since it matches both
-                               e.g., \w and \W, it matches everything, and the
-                               bracketed class can be optimized into qr/./s */
+                    /* We could quit here.  Since it matches both e.g., \w and
+                     * \W, it matches everything, and the bracketed class can
+                     * be optimized into qr/./s.  But to avoid extra code to
+                     * deal with this rare case, we keep going */
                 }
 
                 /* Add this class to those that should be checked at runtime */
                 POSIXL_SET(posixl, namedclass);
 
                 /* The above-Latin1 characters are not subject to locale rules.
-                 * Just add them, in the second pass, to the
-                 * unconditionally-matched list */
+                 * Just add them to the unconditionally-matched list */
 
-                /* Get the list of the above-Latin1 code points this
-                    * matches */
+                /* Get the list of the above-Latin1 code points this matches */
                 _invlist_intersection_maybe_complement_2nd(PL_AboveLatin1,
                                         PL_XPosix_ptrs[classnum],
 
@@ -17278,10 +17282,10 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                                         * NDIGIT, NASCII, ... */
                                         namedclass % 2 != 0,
                                         &scratch_list);
-                /* Checking if 'cp_list' is NULL first saves an extra
-                    * clone.  Its reference count will be decremented at the
-                    * next union, etc, or if this is the only instance, at the
-                    * end of the routine */
+                /* Checking if 'cp_list' is NULL first saves an extra clone.
+                 * Its reference count will be decremented at the next union,
+                 * etc, or if this is the only instance, at the end of the
+                 * routine */
                 if (! cp_list) {
                     cp_list = scratch_list;
                 }
@@ -17293,10 +17297,8 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
             }
             else {
 
-                /* Here, not in pass1 (in that pass we skip calculating the
-                 * contents of this class), and is not /l, or is a POSIX class
-                 * for which /l doesn't matter (or is a Unicode property, which
-                 * is skipped here). */
+                /* Here, is not /l, or is a POSIX class for which /l doesn't
+                 * matter (or is a Unicode property, which is skipped here). */
                 if (namedclass >= ANYOF_POSIXL_MAX) {  /* If a special class */
                     if (namedclass != ANYOF_UNIPROP) { /* UNIPROP = \p and \P */
 
@@ -17440,8 +17442,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
          * <prevvalue> is the beginning of the range, if any; or <value> if
          * not. */
 
-	/* non-Latin1 code point implies unicode semantics.  Must be set in
-	 * pass1 so is there for the whole of pass 2 */
+	/* non-Latin1 code point implies unicode semantics. */
 	if (value > 255) {
             REQUIRE_UNI_RULES(flagp, 0);
 	}
@@ -17686,8 +17687,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
 
 
     if (   posix_warnings && av_tindex_skip_len_mg(posix_warnings) >= 0) {
-        output_or_return_posix_warnings(pRExC_state, posix_warnings,
-                                        return_posix_warnings);
+        output_or_return_posix_warnings(pRExC_state, posix_warnings);
     }
 
     /* If anything in the class expands to more than one character, we have to
@@ -17787,207 +17787,6 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
 	RExC_in_multi_char_class = 0;
         SvREFCNT_dec_NN(multi_char_matches);
         return ret;
-    }
-
-    /* Here, we've gone through the entire class and dealt with multi-char
-     * folds.  We are now in a position that we can do some checks to see if we
-     * can optimize this ANYOF node into a simpler one, even in Pass 1.
-     * Currently we only do two checks:
-     * 1) is in the unlikely event that the user has specified both, eg. \w and
-     *    \W under /l, then the class matches everything.  (This optimization
-     *    is done only to make the optimizer code run later work.)
-     * 2) if the character class contains only a single element (including a
-     *    single range), we see if there is an equivalent node for it.
-     * Other checks are possible */
-    if (   optimizable
-        && ! ret_invlist   /* Can't optimize if returning the constructed
-                              inversion list */
-        && (UNLIKELY(posixl_matches_all) || element_count == 1))
-    {
-        U8 op = END;
-        U8 arg = 0;
-
-        if (UNLIKELY(posixl_matches_all)) {
-            op = SANY;
-        }
-        else if (namedclass > OOB_NAMEDCLASS) { /* this is a single named
-                                                   class, like \w or [:digit:]
-                                                   or \p{foo} */
-
-            /* All named classes are mapped into POSIXish nodes, with its FLAG
-             * argument giving which class it is */
-            switch ((I32)namedclass) {
-                case ANYOF_UNIPROP:
-                    break;
-
-                /* These don't depend on the charset modifiers.  They always
-                 * match under /u rules */
-                case ANYOF_NHORIZWS:
-                case ANYOF_HORIZWS:
-                    namedclass = ANYOF_BLANK + namedclass - ANYOF_HORIZWS;
-                    /* FALLTHROUGH */
-
-                case ANYOF_NVERTWS:
-                case ANYOF_VERTWS:
-                    op = POSIXU;
-                    goto join_posix;
-
-                /* The actual POSIXish node for all the rest depends on the
-                 * charset modifier.  The ones in the first set depend only on
-                 * ASCII or, if available on this platform, also locale */
-
-                case ANYOF_ASCII:
-                case ANYOF_NASCII:
-
-#ifdef HAS_ISASCII
-                    if (LOC) {
-                        op = POSIXL;
-                        goto join_posix;
-                    }
-#endif
-                    /* (named_class - ANYOF_ASCII) is 0 or 1. xor'ing with
-                     * invert converts that to 1 or 0 */
-                    op = ASCII + ((namedclass - ANYOF_ASCII) ^ invert);
-                    break;
-
-                /* The following don't have any matches in the upper Latin1
-                 * range, hence /d is equivalent to /u for them.  Making it /u
-                 * saves some branches at runtime */
-                case ANYOF_DIGIT:
-                case ANYOF_NDIGIT:
-                case ANYOF_XDIGIT:
-                case ANYOF_NXDIGIT:
-                    if (! DEPENDS_SEMANTICS) {
-                        goto treat_as_default;
-                    }
-
-                    op = POSIXU;
-                    goto join_posix;
-
-                /* The following change to CASED under /i */
-                case ANYOF_LOWER:
-                case ANYOF_NLOWER:
-                case ANYOF_UPPER:
-                case ANYOF_NUPPER:
-                    if (FOLD) {
-                        namedclass = ANYOF_CASED + (namedclass % 2);
-                    }
-                    /* FALLTHROUGH */
-
-                /* The rest have more possibilities depending on the charset.
-                 * We take advantage of the enum ordering of the charset
-                 * modifiers to get the exact node type, */
-                default:
-                  treat_as_default:
-                    op = POSIXD + get_regex_charset(RExC_flags);
-                    if (op > POSIXA) { /* /aa is same as /a */
-                        op = POSIXA;
-                    }
-
-                  join_posix:
-                    /* The odd numbered ones are the complements of the
-                     * next-lower even number one */
-                    if (namedclass % 2 == 1) {
-                        invert = ! invert;
-                        namedclass--;
-                    }
-                    arg = namedclass_to_classnum(namedclass);
-                    break;
-            }
-        }
-        else if (value == prevvalue) {
-
-            /* Here, the class consists of just a single code point */
-
-            if (invert) {
-                if (! LOC && value == '\n') {
-                    op = REG_ANY; /* Optimize [^\n] */
-                    *flagp |= HASWIDTH|SIMPLE;
-                    MARK_NAUGHTY(1);
-                }
-            }
-            else if (value < 256 || UTF) {
-
-                /* Optimize a single value into an EXACTish node, but not if it
-                 * would require converting the pattern to UTF-8. */
-                op = compute_EXACTish(pRExC_state);
-            }
-        } /* Otherwise is a range */
-        else if (! LOC) {   /* locale could vary these */
-            if (prevvalue == '0') {
-                if (value == '9') {
-                    arg = _CC_DIGIT;
-                    op = POSIXA;
-                }
-            }
-            else if (! FOLD || ASCII_FOLD_RESTRICTED) {
-                /* We can optimize A-Z or a-z, but not if they could match
-                 * something like the KELVIN SIGN under /i. */
-                if (prevvalue == 'A') {
-                    if (value == 'Z'
-#ifdef EBCDIC
-                        && ! non_portable_endpoint
-#endif
-                    ) {
-                        arg = (FOLD) ? _CC_ALPHA : _CC_UPPER;
-                        op = POSIXA;
-                    }
-                }
-                else if (prevvalue == 'a') {
-                    if (value == 'z'
-#ifdef EBCDIC
-                        && ! non_portable_endpoint
-#endif
-                    ) {
-                        arg = (FOLD) ? _CC_ALPHA : _CC_LOWER;
-                        op = POSIXA;
-                    }
-                }
-            }
-        }
-
-        /* Here, we have changed <op> away from its initial value iff we found
-         * an optimization */
-        if (op != END) {
-
-            /* Emit the calculated regnode,
-             * which should correspond to the beginning, not current, state of
-             * the parse */
-            const char * cur_parse = RExC_parse;
-            RExC_parse = (char *)orig_parse;
-            if (PL_regkind[op] == POSIXD) {
-                if (op == POSIXL) {
-                    RExC_contains_locale = 1;
-                }
-                if (invert) {
-                    op += NPOSIXD - POSIXD;
-                }
-            }
-
-            ret = reg_node(pRExC_state, op);
-
-            if (PL_regkind[op] == POSIXD || PL_regkind[op] == NPOSIXD) {
-                FLAGS(REGNODE_p(ret)) = arg;
-                *flagp |= HASWIDTH|SIMPLE;
-            }
-            else if (PL_regkind[op] == EXACT) {
-                alloc_maybe_populate_EXACT(pRExC_state, ret, flagp, 0, value,
-                                           TRUE /* downgradable to EXACT */
-                                           );
-            }
-            else {
-                *flagp |= HASWIDTH|SIMPLE;
-            }
-
-            RExC_parse = (char *) cur_parse;
-
-            SvREFCNT_dec(posixes);
-            SvREFCNT_dec(nposixes);
-            SvREFCNT_dec(simple_posixes);
-            SvREFCNT_dec(cp_list);
-            SvREFCNT_dec(cp_foldable_list);
-            return ret;
-        }
     }
 
     /* If folding, we calculate all characters that could fold to or from the
@@ -18344,9 +18143,9 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                  || (anyof_flags & ANYOF_SHARED_d_MATCHES_ALL_NON_UTF8_NON_ASCII_non_d_WARN_SUPER)))
     {
         use_anyofd = TRUE;
+        RExC_seen_d_op = TRUE;
         optimizable = FALSE;
     }
-
 
     /* Optimize inverted simple patterns (e.g. [^a-z]) when everything is known
      * at compile time.  Besides not inverting folded locale now, we can't
@@ -18379,24 +18178,20 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
 
     /* Some character classes are equivalent to other nodes.  Such nodes take
      * up less room and generally fewer operations to execute than ANYOF nodes.
-     * Above, we checked for and optimized into some such equivalents for
-     * certain common classes that are easy to test.  Getting to this point in
-     * the code means that the class didn't get optimized there.  Since this
-     * code is only executed in Pass 2, it is too late to save space--it has
-     * been allocated in Pass 1, and currently isn't given back.  XXX Why not?
-     * But turning things into an EXACTish node can allow the optimizer to join
-     * it to any adjacent such nodes.  And if the class is equivalent to things
-     * like /./, expensive run-time swashes can be avoided.  Now that we have
-     * more complete information, we can find things necessarily missed by the
-     * earlier code. */
+     * */
 
-    if (optimizable && cp_list && ! invert) {
-        UV start, end;
-        U8 op = END;  /* The optimzation node-type */
+    if (optimizable) {
         int posix_class = -1;   /* Illegal value */
         const char * cur_parse= RExC_parse;
         U8 ANYOFM_mask = 0xFF;
         U32 anode_arg = 0;
+        UV start, end;
+
+        if (UNLIKELY(posixl_matches_all)) {
+            op = SANY;
+        }
+        else if (cp_list && ! invert) {
+            /* XXX dent */
 
         invlist_iterinit(cp_list);
         if (! invlist_iternext(cp_list, &start, &end)) {
@@ -18437,7 +18232,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                     /* Here, we are generally folding, but there is only one
                      * code point to match.  If we have to, we use an EXACT
                      * node, but it would be better for joining with adjacent
-                     * nodes in the optimization pass if we used the same
+                     * nodes in the optimization phase if we used the same
                      * EXACTFish node that any such are likely to be.  We can
                      * do this iff the code point doesn't participate in any
                      * folds.  For example, an EXACTF of a colon is the same as
@@ -18491,22 +18286,20 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                 op = NASCII;
                 *flagp |= HASWIDTH|SIMPLE;
             }
-            else if (invlist_highest(cp_list) >= 0x2029) {
+            else {
 
                 /* Then try the other POSIX classes.  The POSIXA ones are about
-                 * the same speed as ANYOF ops, but the ones that have
-                 * above-Latin1 code point matches are somewhat faster than
-                 * ANYOF.  So optimize those, but don't bother with the POSIXA
-                 * ones nor [:cntrl:] which has no above-Latin1 matches.  If
-                 * this ANYOF node has a lower highest possible matching code
-                 * point than any of the XPosix ones, we know that it can't
-                 * possibly be the same as any of them, so we can avoid
-                 * executing this code.  The 0x2029 above for the lowest max
-                 * was determined by manual inspection of the classes, and
-                 * comes from \v.  Suppose Unicode in a later version adds a
-                 * higher code point to \v.  All that means is that this code
-                 * can be executed unnecessarily.  It will still give the
-                 * correct answer. */
+                 * the same speed as ANYOF ops, but take less room; the ones
+                 * that have above-Latin1 code point matches are somewhat
+                 * faster than ANYOF.  If this ANYOF node has a lower highest
+                 * possible matching code point than any of the XPosix ones, we
+                 * know that it can't possibly be the same as any of them, so
+                 * we can avoid executing this code.  The 0x2029 above for the
+                 * lowest max was determined by manual inspection of the
+                 * classes, and comes from \v.  Suppose Unicode in a later
+                 * version adds a higher code point to \v.  All that means is
+                 * that this code can be executed unnecessarily.  It will still
+                 * give the correct answer. */
 
                 for (posix_class = 0;
                      posix_class <= _HIGHEST_REGCOMP_DOT_H_SYNC;
@@ -18514,13 +18307,23 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                 {
                     int try_inverted;
 
-                    if (posix_class == _CC_CNTRL) {
-                        continue;
-                    }
-
                     for (try_inverted = 0; try_inverted < 2; try_inverted++) {
 
-                        /* Check if matches normal or inverted */
+                        /* Check if matches POSIXA, normal or inverted */
+                        if (PL_Posix_ptrs[posix_class]) {
+                            if (_invlistEQ(cp_list,
+                                           PL_Posix_ptrs[posix_class],
+                                           try_inverted))
+                            {
+                                op = (try_inverted)
+                                    ? NPOSIXA
+                                    : POSIXA;
+                                *flagp |= HASWIDTH|SIMPLE;
+                                goto found_posix;
+                            }
+                        }
+
+                        /* Check if matches POSIXU, normal or inverted */
                         if (_invlistEQ(cp_list,
                                        PL_XPosix_ptrs[posix_class],
                                        try_inverted))
@@ -18624,6 +18427,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                 if ( ! has_variant
                     && cp_count == 1U << PL_bitcount[bits_differing])
                 {
+                    if (cp_count <= 1) PerlIO_printf(Perl_debug_log, "%s: %d: '%s'\n", __FILE__, __LINE__, RExC_precomp);
                     assert(cp_count > 1);
                     op = ANYOFM;
 
@@ -18635,6 +18439,8 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                     *flagp |= HASWIDTH|SIMPLE;
                 }
             }
+        }
+        /* XXX dent */
         }
 
         if (op != END) {
@@ -19175,8 +18981,12 @@ S_change_engine_size(pTHX_ RExC_state_t *pRExC_state, const Ptrdiff_t size)
 {
     PERL_ARGS_ASSERT_CHANGE_ENGINE_SIZE;
 
+    DEBUG_r(Perl_re_printf( aTHX_  "%s: %d: RExC_size=%d, emit=%d\n", __FILE__, __LINE__, RExC_size, RExC_emit));
     RExC_size += size;
 
+    if (size < 0) {
+        /*Zero(REGNODE_p(RExC_emit + size), -size, regnode);*/
+    }
     Renewc(RExC_rxi,
            sizeof(regexp_internal) + (RExC_size + 1) * sizeof(regnode),
                                                 /* +1 for REG_MAGIC */
@@ -19186,28 +18996,33 @@ S_change_engine_size(pTHX_ RExC_state_t *pRExC_state, const Ptrdiff_t size)
 	FAIL("Regexp out of space");
     RXi_SET(RExC_rx, RExC_rxi);
 
+    DEBUG_r(Perl_re_printf( aTHX_  "%s: %d: change_engine_size %+2ld node equivalents; existing=%ld, emit=%ld\n", __FILE__, __LINE__, size, RExC_size - size, RExC_emit));
+
     RExC_emit_start = RExC_rxi->program;
     if (size > 0) {
         Zero(REGNODE_p(RExC_emit), size, regnode);
     }
 
 #ifdef RE_TRACK_PATTERN_OFFSETS
+    if (size < 0) {
+        /*Zero(RExC_offsets + 2*(RExC_size + 2 * size) + 1, -2 * size, U32);*/
+    }
     Renew(RExC_offsets, 2*RExC_size+1, U32);
     if (size > 0) {
         Zero(RExC_offsets + 2*(RExC_size - size) + 1, 2 * size, U32);
     }
     RExC_offsets[0] = 2*RExC_size+1;
+    DEBUG_r(Perl_re_printf( aTHX_  "%s: %d: change_engine_size new offsets[0]=%d\n", __FILE__, __LINE__, RExC_offsets[0]));
 #endif
 }
 
 STATIC regnode_offset
 S_regnode_guts(pTHX_ RExC_state_t *pRExC_state, const U8 op, const STRLEN extra_size, const char* const name)
 {
-    /* Allocate a regnode for 'op', with 'extra_size' extra space.  In pass1,
-     * it aligns and increments RExC_size; in pass2, RExC_emit
+    /* Allocate a regnode for 'op', with 'extra_size' extra space.  It aligns
+     * and increments RExC_size and RExC_emit
      *
-     * It returns the renode's offset into the regex engine program (meaningful
-     * only in pass2 */
+     * It returns the renode's offset into the regex engine program */
 
     const regnode_offset ret = RExC_emit;
 
@@ -20366,10 +20181,9 @@ Perl_regfree_internal(pTHX_ REGEXP * const rx)
 
     PERL_ARGS_ASSERT_REGFREE_INTERNAL;
 
-    if (! ri) {
-        return;
+    if (! ri /*|| RX_PRELEN(rx) <= 0*/) {
+        return; /* XXX */
     }
-
     DEBUG_COMPILE_r({
 	if (!PL_colorset)
 	    reginitcolors();
@@ -22133,6 +21947,7 @@ Perl_parse_uniprop_string(pTHX_ const char * const name, const Size_t name_len,
     if (table_index > MAX_UNI_KEYWORD_INDEX) {
         Size_t warning_offset = table_index / MAX_UNI_KEYWORD_INDEX;
         table_index %= MAX_UNI_KEYWORD_INDEX;
+                /*ckWARNregdep(RExC_parse + 1,*/
         Perl_ck_warner_d(aTHX_ packWARN(WARN_DEPRECATED),
                 "Use of '%.*s' in \\p{} or \\P{} is deprecated because: %s",
                 (int) name_len, name, deprecated_property_msgs[warning_offset]);
